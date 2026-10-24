@@ -49,6 +49,40 @@ function runInstaller(updated) {
   var args = updated ? ' --updated /S /D=' : ' /S /D=';
   return sh.Run('"' + installer + '"' + args + installDir, 0, true);
 }
+// Never let the official installer walk into resources\runtime through an
+// app/runtime reparse point: NSIS RMDir /r follows links, empties the link target
+// and leaves the directory behind, which then breaks desktop startup with
+// ENOENT resources\runtime\office-skills\office\SKILL.md.
+// `rmdir` without /S removes a junction or symlink itself and fails on a real
+// non-empty directory, so it is safe to call unconditionally.
+function dropRuntimeLink(dir) {
+  if (!dir) return;
+  var link = dir + '\\runtime';
+  // Called unconditionally: `rmdir` also clears a dangling junction, and a missing
+  // path just returns a non-zero code, so only a successful removal is logged.
+  var rc = sh.Run('cmd.exe /d /c rmdir "' + link + '"', 0, true);
+  if (rc === 0) log('drop-runtime-link ' + link);
+}
+function dropRuntimeLinks() {
+  dropRuntimeLink(resources + '\\app');
+  try {
+    var scan = new Enumerator(fso.GetFolder(resources).SubFolders);
+    for (; !scan.atEnd(); scan.moveNext()) {
+      var sub = scan.item();
+      if (String(sub.Name).toLowerCase().indexOf('app.dshpurge-prev') === 0) dropRuntimeLink(sub.Path);
+    }
+  } catch (scanErr) { log('scan-runtime-links ' + (scanErr && scanErr.message ? scanErr.message : scanErr)); }
+}
+// The bundled runtime is what the Host reads on every start. A silent partial
+// extraction here is exactly the failure this guard exists for, so verify the two
+// files the Host itself needs and run one repair pass instead of relaunching into
+// a startup crash dialog. (Only version-agnostic paths: versions.json is newer.)
+function runtimeComplete() {
+  var base = resources + '\\runtime';
+  return fso.FileExists(base + '\\office-skills\\office\\SKILL.md')
+    && fso.FileExists(base + '\\primary-runtime\\runtime.json');
+}
+dropRuntimeLinks();
 var code = runInstaller(true);
 log('installer ' + code);
 var exeChanged = fileSize(exe) !== exeBeforeSize || fileStamp(exe) !== exeBeforeStamp;
@@ -70,6 +104,7 @@ if (!ok) {
   // A concurrent unpack helper may have recreated resources\app. On failure, move the patched dir back.
   if (movedApp && prev && fso.FolderExists(prev)) {
     if (fso.FolderExists(appDir)) {
+      dropRuntimeLink(appDir);
       try { fso.DeleteFolder(appDir, true); log('cleared-recreated-app'); } catch (clearErr) { log('cleared-recreated-app ' + clearErr); }
     }
     if (!fso.FolderExists(appDir)) {
@@ -81,6 +116,12 @@ if (!ok) {
   log('started-old');
 } else {
   if (!movedApp && fso.FolderExists(appDir)) log('move-app-failed');
+  if (!runtimeComplete()) {
+    log('runtime-incomplete; repair pass');
+    code = runInstaller(false);
+    log('repair-installer ' + code);
+  }
+  log('runtime-complete ' + runtimeComplete());
   try {
     var marker = fso.CreateTextFile(resources + '\\dsh-purge-reapply-asar', true);
     marker.WriteLine('1');

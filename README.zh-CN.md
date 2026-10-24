@@ -606,6 +606,7 @@ flowchart LR
 
 - 改动范围是本机 `@deepseek-ai/*` 包里的渲染文案、默认策略和执行逻辑，以及用户目录下的覆盖文件与规则集。
 - 升级后原文对不上会显示跳过，这次应用仍算完成，不会乱改。
+- 解包后**不再往 `resources/app/runtime` 建 junction**：改为让官方 `dsh` CLI 自己识别解包布局（补 `dsh-desktop-host/lib/cli.js` 的 supportDir 推导）。官方安装器清 `resources` 时会跟随 reparse point，旧做法会把自带 runtime 的内容删空、只留下空目录，桌面端下次启动读 `office-skills` 就 ENOENT 弹「could not start」。官方 CLI 原文对不上（换版）时才回退保留链接。
 - 不改动非 `@deepseek-ai` 的第三方插件源仓库（启动时的 CMD 无感会**尽力**修补已装的 doctor / market / 梁神 / mnemon，属运行时补丁）。
 - 安装走 npm 包名 `dsh-purge`：`dsh plugin --profile web add dsh-purge` 或 `dsh plugin --profile desktop add dsh-purge`。当前目录已是本仓库时 `add .`。registry 上不去再加 master.tar.gz。插件市场一键安装走同一个 npm 包。
 

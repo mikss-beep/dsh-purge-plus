@@ -597,6 +597,7 @@ What changed, and the zip, are on [Releases](https://github.com/YuJunZhiXue/dsh-
 
 - Scope is rendered copy, defaults, and runtime logic inside local `@deepseek-ai/*` packages, plus override files and rule sets under the harness home.
 - After an upgrade, unmatched originals show as skipped. Apply still completes, and those files are left unchanged.
+- Unpacking **no longer creates a `resources/app/runtime` junction**: the official `dsh` CLI is patched to recognise the unpacked layout itself (supportDir derivation in `dsh-desktop-host/lib/cli.js`). The official installer follows reparse points when it clears `resources`, so the old junction emptied the bundled runtime and left an empty directory behind — the desktop app then failed to start with ENOENT on `office-skills`. If the official CLI text no longer matches (upstream change), the link is kept as a fallback.
 - Third-party plugin *source repos* outside `@deepseek-ai` are left alone (CMD silence may **best-effort** patch installed doctor / market / liangshen / mnemon at runtime).
 - Install the npm package `dsh-purge`: `dsh plugin --profile web add dsh-purge` or `dsh plugin --profile desktop add dsh-purge`. From this repo, `add .`. If the registry is blocked, add the master.tar.gz URL instead. Hub one-click uses the same npm package.
 

@@ -161,6 +161,88 @@ Bug B 的进程终止也复现了（Node v24.16.0）：同步 `catch` 一次都�
 - `test:cwd` 21 项、`test:gate` 71 项、宿主门禁全绿
 - `compat-check`：79 条补丁全部 settled，0 pending
 - 全库扫描确认：`RewindButton` / `RewindSafe` / `REWIND_CSS` / `installRewindWatch` 出现次数均为 0
+---
+
+## 未发布 / Unreleased — 修「官方升级后桌面端起不来」
+
+### 症状
+
+官方桌面端自动升级到 **0.2.1-rc.3** 后，每次启动都弹：
+
+```
+DeepSeek Harness is unavailable
+The application could not start or stopped unexpectedly.
+ENOENT: no such file or directory, open
+'D:\software\dsh\resources\runtime\office-skills\office\SKILL.md'
+```
+
+`crash-*-host.log` 里是 `DesktopHostFatalError`，栈底在
+`@deepseek-ai/dsh-skill-office/lib/index.js` 的 `readFileSync`。
+
+### 根因
+
+安装目录只少了 `resources\runtime` 这一棵子树（rc.3 里 6150 个文件 / 257 MB：
+`primary-runtime`（node + pnpm + python）、`office-skills`、`cli`、`bin`），其余文件
+（`app.asar`、`locales`、exe/dll、`app.asar.unpacked` 1583 个）都在。
+`resources\runtime` 目录本身还在，只是被删空了。
+
+官方安装包没问题：`installer.exe` 的 `$PLUGINSDIR\app-64.7z` 里有完整的 runtime，
+用它自带的 `dsh-7za.exe` 解压一切正常。删空它的是**跟随 reparse point 的递归删除**：
+
+| 时间 | 事件 |
+| --- | --- |
+| 22:54:07 | 旧安装目录被删后重建，`resources\runtime` 同时创建 |
+| 22:54:14 | `resources\runtime` 的 mtime 停在这里（内容已空），NSIS 进程到 22:54:18 才结束 |
+
+插件解包官方 `app.asar` 后，官方 `dsh` CLI 只认密封包布局：
+
+```js
+// dsh-desktop-host/lib/cli.js
+await runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));
+```
+
+`runtimeDir` 是 `resources/app/dsh` 时 `dirname` 落在 `resources/app`，官方代码会去找
+`resources/app/runtime`，所以旧版插件在那里建了一个指向 `resources/runtime` 的 junction。
+Windows 上 NSIS 的 `RMDir /r` 与 WSH 的 `FileSystemObject.DeleteFolder` 都会跟随
+reparse point：清 `resources` 时先顺着链接把 `resources\runtime` 的内容删掉、再删链接本身，
+而官方包体里的 runtime 那一刻已经解压完（或没被重新解开），于是只留下空目录。
+
+> Node 的 `fs.rmSync(..., { recursive: true })` 用 lstat 判断、只 unlink 链接本身，
+> 不会跟进去（Node 22 与宿主自带的 Node 24.21.0 实测都安全）。危险来自 Node 之外的递归删除。
+
+### 修复
+
+| 层 | 文件 | 做法 |
+| --- | --- | --- |
+| **1. 拔根** | `lib/desktop.js` | 新增 `patchHostCliSupportDir()`：给解包后的官方 `dsh-desktop-host/lib/cli.js`（以及 host 入口 `index.js` 的 primaryRuntime 兜底）注入 `dshPurgeSupportRoot()`，让它自己认出解包布局。补丁命中后调用 `removeAppRuntimeLink()` **摘掉** `resources/app/runtime`，盘上不再留 reparse point。 |
+| **2. 兜底** | `lib/desktop.js` | 官方 CLI 原文对不上（上游改版、锚点漂移）时才回退 `ensureAppRuntimeSymlink()`，保持旧行为，`dsh` CLI 不会 `MODULE_NOT_FOUND`。 |
+| **3. 防御** | `lib/reparse.js`（新） | `pruneReparsePoints()` / `unlinkReparsePoint()`：任何递归删除之前先摘链接、绝不动目标。接到 `discardExtractedDir()`、`restoreExtractedDir()`、`clearStaleExtractedApps()`、`restart-desktop.js` / `uninstall-restart.js` 的 `rmTree()`。 |
+| **4. 升级交接** | `lib/official-update.wscript` | 跑官方安装器之前用 `rmdir`（不带 `/S`）摘掉 `resources\app*\runtime`；安装完校验 `office-skills\office\SKILL.md` 与 `primary-runtime\runtime.json`，缺了就再跑一遍安装器补一次，结果写进 `%TEMP%\dsh-purge-official-update.log`。 |
+| **5. 现场可见** | `lib/core.js`、`lib/index.js` | `/purge status` 多一行「桌面 runtime」，报告 runtime 是否完整、`app/runtime` 是否仍是链接——下次出事不用再靠猜。 |
+
+### 顺带修掉的两个同源崩溃点
+
+同一条「起不来」的现场 log 里还有两条独立故障（`await atomicCopyFile` 那条已由 1.4.4 / PR #4 修掉）：
+
+1. `atomicWriteSync` / `atomicWriteFile` / `atomicCopyFile` 的临时名原来是
+   `${file}.${pid}.${Date.now()}` —— **同毫秒并发就撞名**，后一个 `rename` 拿不到临时文件直接 `ENOENT`。
+   现场：`fatal load failure: ENOENT: rename '...dsh.cmd.dsh-purge.bak.<pid>.<ts>.copytmp'`。
+   现在临时名带进程内递增序号（`atomicTmpName()`），12 个并发拷贝实测通过。
+2. 官方 `dsh.cmd` / host CLI 被运行中的桌面端持有时 `rename` 会 `EPERM`
+   （本机实测：`DeepSeek Harness.exe` 同时持有 3 个 `dsh.cmd` handle），旧逻辑只记 `write_error`，
+   于是这个 shim 从 10-17 起一直没打上 → 解包布局下 `dsh` 命令会 `MODULE_NOT_FOUND`。
+   新增 `writePatchedFile()`：`EPERM` 时退回原地写，状态标 `patched_in_place`。
+
+### 验证
+
+`npm run test:runtime-link`（`test/runtime-link.mjs`，31 项）：
+
+- reparse point 助手：能认出 junction、摘掉链接、**目标内容原封不动**、真实目录拒删；
+- 官方 CLI 补丁：命中原文、注入的 `dshPurgeSupportRoot` 在密封 / 解包两种布局下都落在
+  `resources/runtime`、二次运行幂等、留 `.dsh-purge.bak`；
+- `repairOfficialCliAfterUnpack`：CLI 可补时**不留** junction；**老安装里已存在的 junction 被摘掉且
+  runtime 内容不动**；原文对不上时回退保留链接；
+- 本机若存在解包后的官方 `cli.js`，再断言补丁正则仍然命中（否则显式 `skip`）。
 
 ---
 

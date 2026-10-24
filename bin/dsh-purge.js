@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import path from "node:path";
+
 import * as core from "../lib/core.js";
 import * as rules from "../lib/rules.js";
 
@@ -21,6 +23,13 @@ function printStatus(state) {
   }
   out.push(`  shim 目录      ${state.shim_dir || "未定位 / not found"}`);
   out.push(`  备份 / backup  ${state.has_backup ? "有 / yes" : "无 / no"}`);
+  const guard = state.runtime_guard;
+  if (guard) {
+    const detail = guard.complete
+      ? `完整 / complete${guard.app_link ? " · app/runtime 仍是链接 / link present" : ""}`
+      : `缺 / missing: ${guard.missing.map((probe) => path.relative(guard.path, probe).split(path.sep).join("/")).join(", ")}`;
+    out.push(`  桌面 runtime  ${detail}`);
+  }
   out.push(`  注入文件       ${state.override_path}`);
   out.push(`  注入状态       ${state.override_status}`);
   out.push("");
@@ -92,6 +101,27 @@ async function main() {
       }
     } else {
       console.log("  ⚠ 未定位 shim 目录，跳过注入");
+    }
+    // 解包后官方 `dsh` CLI 需要知道 runtime 在哪：补 CLI 就不必留 `app/runtime` junction。
+    // 官方安装器清 `resources` 时会跟随 reparse point，留着链接就会把自带 runtime 删空。
+    let cliRepair = null;
+    try {
+      cliRepair = await core.repairOfficialCliAfterUnpack();
+    } catch (e) {
+      cliRepair = { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+    if (!cliRepair || cliRepair.ok !== true) {
+      console.log(`  ⚠ 官方 CLI 修补失败 / host CLI repair failed: ${cliRepair?.reason || cliRepair?.error || "unknown"}`);
+    } else {
+      const rows = Array.isArray(cliRepair.hostCli) ? cliRepair.hostCli : [];
+      if (rows.length > 0) {
+        console.log(`  host CLI support-dir: ${rows.map((row) => `${row.file}=${row.status}`).join(" ")}`);
+      }
+      const link = cliRepair.symlink || {};
+      if (link.removed) console.log("  ✓ 已摘除 resources/app/runtime 链接 / dropped app/runtime link");
+      else if (link.created) console.log("  ⚠ 回退：保留 resources/app/runtime 链接 / fallback link kept");
+      else if (link.ok === true) console.log("  - 无需 app/runtime 链接 / no app/runtime link needed");
+      else if (link.ok === false) console.log(`  ⚠ app/runtime 链接处理失败: ${link.reason || link.error || ""}`);
     }
     console.log("");
     console.log("全部完成 / All done。重启 dsh 生效 / Restart dsh to take effect.");
